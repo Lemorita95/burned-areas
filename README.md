@@ -48,3 +48,6 @@ this file holds the Model() object, i.e. the Convolutional Neural Network with i
 
 ### satellite_images.py
 this file deals with the interface with earth engine, the aquisiton of image collection, binary mask, image save.
+
+## to-do
+data is unbalance. implement things to deal with it for better predictions.
