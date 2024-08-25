@@ -1,4 +1,4 @@
-# CITY FIRES
+# BURNED AREAS
 convolutional neural network to identify burned areas from png satellite images.
 
 model was trained with sentinel2 surface reflectance (S2_SR) images.
