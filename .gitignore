@@ -1,0 +1,12 @@
+__pycache__
+.DS_Store
+images
+predictions
+unseen_data
+
+<<<<<<< HEAD
+repo-backup*.git
+=======
+repo-backup.git
+>>>>>>> 30c1a9489195ed895bf1e7a5b7d4f94199b97cee
+.env

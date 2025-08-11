@@ -1,0 +1,4 @@
+requests
+earthengine-api
+numpy
+tensorflow
