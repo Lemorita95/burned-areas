@@ -2,3 +2,4 @@ requests
 earthengine-api
 numpy
 tensorflow
+albumentations

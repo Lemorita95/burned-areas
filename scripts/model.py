@@ -1,9 +1,4 @@
-from scripts.helpers import tf, PNG_RESOLUTION
-
-import torch.nn as nn
-import torch
-from torch.nn.utils.rnn import pad_sequence
-
+from scripts.helpers import tf, torch, nn, PNG_RESOLUTION
 
 class Model():
 
@@ -61,85 +56,81 @@ class Model():
         self.model = model
         
 
+class PatchEmbedding(nn.Module):
+    def __init__(self, img_size=480, patch_size=16, in_channels=3, embed_dim=512):
+        super().__init__()
+        assert img_size % patch_size == 0, "Image size must be divisible by patch size"
+        self.num_patches = (img_size // patch_size) ** 2
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+
+        self.proj = nn.Linear(patch_size * patch_size * in_channels, embed_dim)
+
+    def forward(self, x):
+        B, H, W, C = x.shape
+        # unfold patches
+        patches = x.permute(0, 3, 1, 2).unfold(2, self.patch_size, self.patch_size) \
+                   .unfold(3, self.patch_size, self.patch_size)  # [B, C, nH, nW, pH, pW]
+        patches = patches.contiguous().view(B, C, -1, self.patch_size, self.patch_size)
+        patches = patches.permute(0, 2, 1, 3, 4)  # [B, num_patches, C, pH, pW]
+        patches = patches.flatten(3)  # flatten patch spatial dims: [B, num_patches, C, pH*pW]
+        patches = patches.flatten(2)  # flatten channels + pixels: [B, num_patches, C*pH*pW]
+
+        embeddings = self.proj(patches)  # [B, num_patches, embed_dim]
+        return embeddings
+    
+
 class TransformerModel(nn.Module):
-    def __init__(
-        self,
-        d_model=128,
-        nhead=2,
-        dim_feedforward=32,
-        num_layers=2,
-        input_dim=3,
-        output_dim=2,
-    ):
-        super(TransformerModel, self).__init__()
+    def __init__(self, img_size=480, patch_size=16, in_channels=3, embed_dim=512,
+                 num_layers=6, num_heads=8, dim_feedforward=2048, dropout=0.1):
+        super().__init__()
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.num_patches_side = img_size // patch_size  # g
+        self.num_patches = self.num_patches_side ** 2   # total patches
 
-        # Hint: define the input embedding layer
-        self.embbeding = nn.Linear(input_dim, d_model)
+        # Patch embedding
+        self.patch_embed = PatchEmbedding(img_size, patch_size, in_channels, embed_dim)
+        self.pos_embed = nn.Parameter(torch.randn(1, self.patch_embed.num_patches, embed_dim))
 
-        encoder_layer = nn.TransformerEncoderLayer(  # https://pytorch.org/docs/stable/generated/torch.nn.TransformerEncoderLayer.html
-            d_model=d_model,
-            nhead=nhead,
+        # Transformer
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
             dim_feedforward=dim_feedforward,
-            activation="relu",
-            batch_first=True,
-            norm_first=True,
-            dropout=0.02
+            dropout=dropout,
+            batch_first=True
         )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers) # https://pytorch.org/docs/stable/generated/torch.nn.TransformerEncoder.html
+        # Project patch embeddings to pixels
+        self.patch_to_pixels = nn.Linear(embed_dim, patch_size * patch_size)
 
-        # Hint: define the output projection layer
-        self.output_layer = nn.Linear(d_model, output_dim)
-
-
-    def forward(self, data) -> torch.Tensor:
+    def forward(self, x):
         """
-        Args:
-            data: list of (src tensor, lengths)
-        Returns:
-            Tensor of shape (batch, output_dim)
+        x: [B, H, W, C]
+        returns: [B, 1, H, W] logits
         """
+        B = x.size(0)
+        p = self.patch_size
+        g = self.num_patches_side
 
-        src, lengths = data[0], data[1]
+        # 1. Patch embeddings
+        x = self.patch_embed(x)  # [B, num_patches, embed_dim]
 
-        # F: input_dim, number of features (time, x, y)
-        # N: number of hits
-        # D: hidden_dim, internal transformer computing dimension
-        # B: batch size
+        # 2. Positional encoding
+        x = x + self.pos_embed
 
-        # 1) embed the input data into the hidden dimension
-        # shape (B x N, F) -> (B x N, D)
-        # B X N comes from collate_fn_transformer used in DataLoader
-        src = self.embbeding(src)  # shape (B x N, F) -> (B x N, D)
+        # 3. Transformer
+        x = self.transformer(x)  # [B, num_patches, embed_dim]
 
-        # 2) split the data into a list of tensors, one for each event
-        parts = src.split(lengths, dim=0)  # shape (B x N, D) -> (B, N, D), where every batch entry can have a variable length,
-                                           # i.e., list of tensors of shape (N_i, D) where N_i is the number of hits in the i-th event
+        # 4. Project each patch to patch pixels
+        x = self.patch_to_pixels(x)  # [B, num_patches, p*p]
+        x = x.view(B, g, g, p, p)    # [B, gH, gW, pH, pW]
 
-        # 3) pad inputs with zeros so that all batch items have same length
-        padded = pad_sequence(parts, batch_first=True) # shape (B, N, D) -> (B x MAXLEN x D) now all batch entries have the same length
-        batch_size, max_len, _ = padded.shape
+        # 5. Stitch patches back to full image
+        x = x.permute(0, 1, 3, 2, 4)  # [B, gH, pH, gW, pW]
+        x = x.reshape(B, g*p, g*p, 1)  # [B, H, W, 1]
 
-        # 4) build the padding mask (batch_size, max_len)
-        # we need to keep track which tokens are padding tokens and which are real tokens
-        # the mask is a boolean tensor of shape (B, MAXLEN) where True indicates that the corresponding entry is a padding token
-        # and False indicates that the corresponding entry is a real token
-        # the mask is used to ignore the padding tokens in the attention mechanism
-        mask = torch.zeros(batch_size, max_len, dtype=torch.bool).to(device=padded.device, dtype=torch.bool)
-        for i, L in enumerate(lengths):
-            mask[i, L:] = True
-
-        # 5) call the transformer with padded tensor of shape (B, MAXLEN, D) and corresponding mask of shape (B, MAXLEN)
-        enc_out = self.encoder(padded, src_key_padding_mask=mask)
-
-        # 6) masked mean‐pool, i.e., form the average for every batch item along the sequence dimension
-        # the output of the transformer is a tensor of shape (B, MAXLEN, D)
-        # we need to take the mean over the sequence dimension (MAXLEN) to get a single vector for each batch item
-        # we need to ignore the padding tokens in the mean pooling
-        # the resulting shape is (B, D)
-        valid_mask = ~mask
-        summed = (enc_out * valid_mask.unsqueeze(-1)).sum(dim=1)
-        pooled = summed / torch.LongTensor(lengths)[:,None].to(enc_out)
-
-        # 7) apply a final linear layer to get the output of shape (B, output_dim)
-        return self.output_layer(pooled)
+        return x  # logits for BCEWithLogitsLoss

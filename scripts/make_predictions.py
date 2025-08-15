@@ -1,12 +1,12 @@
-from image_processor import *
-from helpers import *
+from scripts.processor import *
+from scripts.helpers import *
 
 
 # load model
 model = tf.keras.models.load_model(MODEL_PATH)
 
 # load images
-data = Processor().load_unseen_data()
+data = CustomDataset().load_unseen_data()
 
 # initiate counter
 i = 0
